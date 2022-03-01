@@ -6,7 +6,7 @@ Design Philosophy:
 
 Scenario:
  Step 1: Carol (issuer) generates a signed a x.509 cert (note: current implementation does NOT use x.509, the credential is just a base64 encoded dictionary of values for now)
- Step 2: Alice (citizen) receives credential, verifies it and encrypts it with her her public key (ecies derive).
+ Step 2: Alice (citizen) receives credential, verifies it and encrypts it with her her public key (via ECIES).
  Step 3: Alice generate security triplet: cid, meta and uri
     Step 3a: Alice distributes encrypted claim to a distrution protocol (e.g. IPFS, dropbox etc) (simulated for now)
     Step 3b: Record the triplet onto Hyperledger Fabric (simulated for now)
