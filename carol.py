@@ -9,7 +9,7 @@ import base64
 import json
 from nacl.signing import SigningKey
 
-def sign_claim(claim):
+def sign_claim_Ed25519(claim):
     '''
     Function to allow Carol to sign a claim. A public/private key pair is generated using Ed25519. The claim is then signed.
 

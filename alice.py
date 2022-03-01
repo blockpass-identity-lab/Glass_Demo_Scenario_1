@@ -2,29 +2,30 @@
 Alice is a graduate at ENU. She is looking to obtain employment from Bob but needs to first prove the validity of her claim (diploma) to her new potential employer.
 
 In the implemented scenario, Alice receives a signed claim from her university via Carol. 
-Alice generates a public/private key pair via RSA (RSA_pub, RSA_priv). She also generates a secret key AES_sec, using AES.
-Alice encrypt her signed claim (received from Carol) as follows: Enc(AES_sec, signed_claim). She then encrypts the AES_sec using RSA: Enc(RSA_pub, AES_sec).
-Alice generates a security triplet (cid, meta, uri) where meta = Enc(RSA_pub, AES_sec).
+Alice generates a public/private key pair using ECIES (ecies_pub_key, ecies_priv_key). The ecies_pub_key is used to derived a symmetric AES-256-GCM key.
+Alice encrypt her signed claim (received from Carol) as follows: ECIES_ENC(ecies_pub_key, signed_claim). Internally, the ECIES_ENC function will derive and output an encrypted common secret (encrypted version of AES-256-GCM key).
+Alice generates a security triplet (cid, meta, uri) where meta = ECIES encrypted common secret.
 Alice distributes her encrypted signed credential to a distribution protocol (e.g. IPFS, Dropbox etc).
 Alice records the triplet on Hyperledger Fabric for future lookup.
 
 In the future, when Alice wishes to present her signed claim (diploma) to Bob for employment, she retrieves the encrypted signed credential from IPFS (or dropbox etc).
-Alice queries Hyperledger Fabric to obtain meta (encrypted AES key) value.
-Alice uses her RSA private key to decrypt meta:  Dec(RSA_priv, Enc(RSA_pub, AES_sec)) = AES_sec.
-Alice uses  AES_sec to decrypt her signed claim. 
-Alice presents her signed claim to Bob.
+Alice queries Hyperledger Fabric to obtain 'meta' (ECIES encrypted common secret) value.
+Alice uses her ECIES private key to decrypt 'meta' ECIES encrypted common secret --(which derives to)--> AES-256-GCM key --(used to decrypt)--> encrypted signed claim.
+Alice presents her decrypted signed claim to Bob.
 Bob can then verify the claim.
 """
 
 import pickle
 
 from nacl.signing import VerifyKey
-from Crypto.PublicKey import RSA
-from Crypto.Random import get_random_bytes
-from Crypto.Cipher import AES, PKCS1_OAEP
+from ecies.utils import generate_eth_key
+from ecies import encrypt, decrypt
+import binascii
 
-meta = {}
-encrypted_claim = None
+hlf = { }
+
+ipfs = { }
+
 
 def verify_claim(signed_claim, pub_key):
     '''
@@ -44,82 +45,62 @@ def verify_claim(signed_claim, pub_key):
     except Exception:
         return False
 
-def generate_key(): #gen rsa public/private key pair
+def generate_key_ecies():
     '''
-    Generate a public and private key pair using RSA (2048 bits). 
-    The RSA public key is used by Alice to encrypt her symmetric key (AES). 
-    The symmetric key is used to encrypt her signed claim so it can be securely distributed to a distribution protocol (IPFS, Dropbox, etc).
+    Generate a public and private key pair using ECIES (Elliptic Curve Integrated Encryption Scheme). 
+    The public key is used by Alice to derive a symmetric key. The library used in this implementation (ecies) combines secp256k1 and AES-256-GCM.
+    The derived symmetric key is used to encrypt Alice's signed claim so it can be securely distributed to a distribution protocol (IPFS, Dropbox, etc).
 
             Returns:
-                    rsa_private_key (bytes), rsa_public_key (bytes): The generated RSA private key and public key respectively.
+                    ecies_priv_key (str), ecies_pub_key (str): The generated ECIES key pair in hex.
     '''
-    rsa_key = RSA.generate(2048)
-    rsa_private_key = rsa_key.export_key() #Export private key, saved in-memory for now.
-    rsa_public_key = rsa_key.publickey().export_key() #Export public key, saved in-memory for now.
-    
-    return rsa_private_key, rsa_public_key
+    privKey = generate_eth_key()
+    ecies_priv_key = privKey.to_hex()
+    ecies_pub_key = privKey.public_key.to_hex()
 
-def encrypt_claim(signed_claim, rsa_public_key):
+    return ecies_priv_key, ecies_pub_key
+
+def encrypt_claim_ecies(signed_claim, ecies_pub_key):
     '''
-    Encrypts a signed claim using AES EAX. The AES secret key is then encrypted using Alice's RSA public key.
+    Encrypts a signed claim using ECIES.
 
             Parameters:
                 signed_claim (nacl.signing.SignedMessage): Object which represents the signed claim. Contains properties of claim (original message) and signature.
-                rsa_public_key (bytes) : RSA public key to be used to encrypt the AES secret key.
+                ecies_pub_key (str) : ECIES public key, which will be used to derived an AES-256-GCM secret key used to encrypt the signed claim.
 
             Returns:
-                    enc_session_key (bytes), cipher_aes.nonce (bytes), tag (bytes), encrypted_claim (bytes): The encrypted AES EAX key, AES EAX nonce, AES EAX tag and encrypted signed claim respectively.
+                    encrypted_claim (bytes): holds 4 values {cipherPubKey, AES-nonce, authTag, AES-ciphertext} in binary. See https://wizardforcel.gitbooks.io/practical-cryptography-for-developers-book/content/asymmetric-key-ciphers/ecies-example.html for details.
     '''
     serialised_signed_claim = pickle.dumps(signed_claim) #use in-built python module, pickle, to serialise the signed_claim object into binary stream form.
+    encrypted_claim = encrypt(ecies_pub_key, serialised_signed_claim)
+    
+    return encrypted_claim
 
-    rsa_public_key = RSA.import_key(rsa_public_key)
-    aes_key = get_random_bytes(16)
-
-    # Encrypt the AES key with the public RSA key
-    cipher_rsa = PKCS1_OAEP.new(rsa_public_key)
-    enc_session_key = cipher_rsa.encrypt(aes_key)
-
-    # Encrypt the data with the AES session key
-    cipher_aes = AES.new(aes_key, AES.MODE_EAX)
-    encrypted_claim, tag = cipher_aes.encrypt_and_digest(serialised_signed_claim)
-
-    return enc_session_key, cipher_aes.nonce, tag, encrypted_claim
-
-def decrypt_claim(enc_session_key, nonce, encrypted_claim, tag, rsa_private_key):
+def decrypt_claim_ecies(encrypted_claim, ecies_priv_key):
     '''
     Decrypt an encrypted signed claim using AES EAX. The encrypted AES secret key first decrypted using Alice's RSA private key. The decrypted AES key is then used to decrypt the encrypted signed claim.
 
             Parameters:
-                enc_session_key (bytes) : The encrypted AES EAX secret key.
-                nonce (bytes) : The AES EAX nonce value.
-                encrypted_claim (bytes) : The encrypted signed claim.
-                tag (bytes) : The AES EAX tag value.
-                rsa_private_key (bytes) : The RSA private key to to decrypt enc_session_key
+                encrypted_claim (bytes) : The encrypted claim (including encrypted common secret key used to encrypt the claim).
+                ecies_priv_key (str) : The ECIES private key which is paired to the common secret. Used to 'unlock' encrypted common secret which can then be used to decrypt claim.
 
             Returns:
                     decrypted_claim (bytes) : Decrypted signed claim (Alice's diploma details in plaintext).
     '''
-    rsa_private_key = RSA.import_key(rsa_private_key)
-    
-    # Decrypt the AES key with the private RSA key
-    cipher_rsa = PKCS1_OAEP.new(rsa_private_key)
-    aes_key = cipher_rsa.decrypt(enc_session_key)
-
-    cipher_aes = AES.new(aes_key, AES.MODE_EAX, nonce)
-    data = cipher_aes.decrypt_and_verify(encrypted_claim, tag)
-    decrypted_claim = pickle.loads(data)
+    decrypted_claim = decrypt(ecies_priv_key, encrypted_claim)
+    decrypted_claim = pickle.loads(decrypted_claim) #deserialise from byte back to nacl obj
 
     return decrypted_claim
 
-def distribute_claim(encrypted_claim):
+def distribute_claim(cipher):
     '''
     TODO: Interface into the real IPFS in this function.
-    In reality, encrypted_claim.hex() should be added to IPFS (or sharepoint, dropbox etc) and a unique CID will be generated.
-    A unique URI will also be generated to define where the claim encrypted_claim.hex() has been saved to. 
+    In reality, input cipher should be added to IPFS (or sharepoint, dropbox etc) and a unique CID will be generated.
+    A unique URI will also be generated to define where the cipher (encrypted claim) has been saved to. 
     For now, we hardcode and return a mockup CID and URI for demo purposes.
 
             Parameters:
-                encrypted_claim (bytes) : Encrypted signed claim to distribute to IPFS/Dropbox/Sharepoint etc.
+                cipher (bytes) : Encrypted signed claim to distribute to IPFS/Dropbox/Sharepoint etc. Consists of 3 values {AES-nonce, authTag, AES-ciphertext} in binary.
 
             Returns:
                     cid (str), uri (str) : Generated CID of claim and URI (pointer) to where claim may be retrieved from.
@@ -133,48 +114,65 @@ def distribute_claim(encrypted_claim):
     #cid = interface.add_to_ipfs(encrypted_claim.hex())
     #uri = "ipfs://"" + cid
 
-    encrypted_claim = encrypted_claim # Set the encrypted_claim to global encrypted_claim (equivelent of distributing to IPFS)
     cid = "QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHd8P34isapyhCxX"
+    ipfs[cid] = cipher #simulation of adding cipher to IPFS occurs here.
     uri = "ipfs://QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHd8P34isapyhCxX"
 
     return cid, uri
 
-def generate_triplet(enc_session_key, nonce, tag, encrypted_claim):
+def generate_triplet(encrypted_claim):
     '''
-    Generate a security triplet based and distribute on distribution protocol (IPFS, Sharepoint, Dropbox etc).
+    Generate a security triplet (CID, meta and URI) and distribute encrypted claim to a distribution protocol (IPFS).
 
             Parameters:
-                enc_session_key (bytes) : The encrypted AES EAX key used to encrypted the signed claim.
-                nonce (bytes) : The AES EAX nonce value.
-                tag (bytes) : The AES EAX tag value.
-                encrypted_claim (bytes) : The encrypted signed claim.
+                encrypted_claim (bytes) : The encrypted signed claim. Expected to holds 4 values: {cipherPubKey, AES-nonce, authTag, AES-ciphertext} in binary. 
 
             Returns:
-                    cid (str), meta (dict), uri (str) : CID, encryption meta data and URI of encrypted claim (i.e. unique ID of a signed claim, encrypted key metadata which can 'unlock' the signed claim, and location of where the signed claim is stored) 
+                    cid (str), meta (byte), uri (str) : CID, meta and URI of encrypted claim (i.e. unique ID of a signed claim, common encrypted secret which can 'unlock' the signed claim, and location of where the signed claim is stored) 
     '''
-    global meta
-    #DO NOT confuse meta with triplet. Meta simply contains the encrypted AES key and related nonce,tags (i.e. metadata).
-    meta = {"encrypted_session_key" : enc_session_key.hex(), 
-            "nonce" : nonce.hex(), 
-            "tag" : tag.hex(),
-           }
+    # As noted above, the input of encrypted_claim is expected to hold 4 values: {cipherPubKey, AES-nonce, authTag, AES-ciphertext} in binary.
+    # The links below show how we can index the binary values to split/extract <cipherPubKey> and <AES-nonce, authTag, AES-ciphertext> into two components.
+    # Recall that cipherPubKey = common encrypted secret (i.e. encrypted version of AES-256-GCM key used to encrypt the sign claim)
+    #             AES-nonce, authTag, AES-ciphertext = Encrypted sign claim itself plus auth tag/nonce.
+    #
+    # https://github.com/ecies/py/blob/9f0f33ace4550aabf7598560c0dc4bb10a9798b6/ecies/__init__.py#L61
+    # https://wizardforcel.gitbooks.io/practical-cryptography-for-developers-book/content/asymmetric-key-ciphers/ecies-example.html
+    # msg = equivalent to encrypted_claim
+    # pubkey = msg[0:65]  # uncompressed pubkey's length is 65 bytes
+    # encrypted = msg[65:]
+    #
+    # https://github.com/ecies/py/blob/9f0f33ace4550aabf7598560c0dc4bb10a9798b6/ecies/utils.py#L209-L211
+    # iv = encrypted[:16]
+    # tag = encrypted[16:32]
+    # ciphered_data = encrypted[32:]
 
+    meta = encrypted_claim[0:65] #Should consist of cipherPubKey (common encrypted secret) only.
+    cipher = encrypted_claim[65:] #Should consist of AES-nonce + authTag + AES-ciphertext
+   
     #Distribute the encrypted claim onto IPFS (or dropbox, sharepoint etc)
-    cid, uri = distribute_claim(encrypted_claim.hex())
+    cid, uri = distribute_claim(cipher)
 
-    #return our generated triplet of cid, meta, uri. meta is the encrypted aes key (+ related meta data)
+    #return our generated triplet of cid, meta, uri. meta consists of the public key used to encrypt the AES key only.
     return cid, meta, uri
 
 def record_triplet_hyperledger(cid, meta, uri):
     '''
-    TODO: implement and test. Function should record the security triplet onto an instance of HLF.
+    TODO: implement and test. Function should record the security triplet onto an instance of HLF. For now, we simulate recording record to HLF.
     '''
-    pass
+    hlf[cid] = (meta, uri)
     #interface.record_to_hlf(cid, meta, uri)
     
 def read_key_hyperledger(cid):
     '''
-    TODO: implement and test. Function should retrieve the meta data of an encrypted signed claim from HLF. Used to retrieve metadata (incl. encrypted secret key) to allow Alice to decrypt a signed claim.
+    TODO: implement and test. Function should retrieve the meta data of an encrypted signed claim from HLF. Used to retrieve metadata (ECIES common encrypted secret) to allow Alice to decrypt a signed claim. Lookup is simulated for now.
     '''
     #meta = interface.read_from_hlf(cid, "org1.org")
-    return meta
+    return hlf[cid][0]
+
+def retrieve_encrypted_claim_ipfs(cid):
+    '''
+    TODO: implement and test. Function should retrieve the encrypted signed claim from IPFS (or other distribution protocol in future). Simulated retrieval for now.
+    '''
+    #meta = interface.get_from_ipfs(cid, "org1.org")
+    return ipfs[cid]
+    

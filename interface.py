@@ -16,6 +16,10 @@ def add_to_ipfs(file):
     result = subprocess.run(["ipfs", "add", "{0}".format(file), "--quieter" ], stdout=subprocess.PIPE, text=True)
     return result.stdout.strip('\n')
 
+def get_from_ipfs(cid):
+    #TODO: integrate and test. Should perform: ipfs get <cid> 
+    pass
+
 def record_to_hlf(cid, meta, uri):
     """
     Encode cid, meta and uri into base64 and record onto HLF by invoking the 'createGlassResource' chaincode.
